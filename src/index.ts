@@ -7,6 +7,9 @@ const ANSI_REGEX = /\u001b\[[0-9;]*m/g;
 let logs = "";
 let inteli = "";
 let ai = true;
+let isGenerating = false;
+const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+let spinnerIndex = 0;
 
 export function stripAnsi(input: string): string {
   return input.replace(ANSI_REGEX, "");
@@ -14,15 +17,33 @@ export function stripAnsi(input: string): string {
 
 const screen = blessed.screen({
   smartCSR: true,
+  fastCSR: true,
   title: "gaze",
+  fullUnicode: true,
+  autoPadding: true,
+  warnings: false,
+});
+
+const header = blessed.box({
+  parent: screen,
+  top: 0,
+  height: 1,
+  width: "100%",
+  content:
+    " {bold}{cyan-fg}GAZE{/cyan-fg}{/bold} - Next.js Development Monitor",
+  tags: true,
+  style: {
+    fg: "white",
+    bg: "black",
+  },
 });
 
 const left = blessed.box({
   parent: screen,
   left: 0,
-  top: 0,
+  top: 1,
   width: ai ? "50%" : "100%",
-  height: "100%-1",
+  height: "100%-2",
   label: " {bold}Logs{/bold} (j↑ k↓ c-clear) ",
   scrollable: true,
   alwaysScroll: true,
@@ -40,9 +61,9 @@ const left = blessed.box({
 const right = blessed.box({
   parent: screen,
   left: "50%",
-  top: 0,
+  top: 1,
   width: "50%",
-  height: "100%-1",
+  height: "100%-2",
   label: " {bold}Intelligence{/bold} (j↑ k↓) ",
   scrollable: true,
   alwaysScroll: true,
@@ -61,13 +82,16 @@ const status = blessed.box({
   bottom: 0,
   height: 1,
   width: "100%",
-  content: ` {green-fg}●{/green-fg} PORT:3000 - (a) Toggle Intelligence: ${
+  content: ` {green-fg}●{/green-fg} PORT:3000 - (a) AI: ${
     ai ? "ON" : "OFF"
-  } - (c) Clear Logs `,
+  } - (c) Clear - (q) Quit `,
   tags: true,
 });
 
-screen.key(["q", "C-c"], () => process.exit(0));
+screen.key(["q", "C-c"], () => {
+  screen.destroy();
+  process.exit(0);
+});
 screen.key(["a"], () => {
   ai = !ai;
   if (ai) {
@@ -77,9 +101,6 @@ screen.key(["a"], () => {
     right.hide();
     left.width = "100%";
   }
-  status.content = ` {green-fg}●{/green-fg} PORT:3000 - (a) Toggle Intelligence: ${
-    ai ? "ON" : "OFF"
-  } - (c) Clear Logs `;
   screen.render();
 });
 screen.key(["c"], () => {
@@ -90,10 +111,29 @@ screen.key(["c"], () => {
 
 screen.render();
 
+let spinnerInterval: ReturnType<typeof setInterval> | null = null;
+
+function startSpinner() {
+  isGenerating = true;
+  spinnerInterval = setInterval(() => {
+    spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
+    right.setContent(
+      `{yellow-fg} ${spinnerFrames[spinnerIndex]} Thinking{/yellow-fg}`
+    );
+    screen.render();
+  }, 80);
+}
+
+function stopSpinner() {
+  isGenerating = false;
+  if (spinnerInterval) {
+    clearInterval(spinnerInterval);
+    spinnerInterval = null;
+  }
+  screen.render();
+}
+
 ws.onopen = () => {
-  status.content = ` {green-fg}●{/green-fg} PORT:3000 - Connected - (a) Toggle Intelligence: ${
-    ai ? "ON" : "OFF"
-  } - (c) Clear Logs `;
   screen.render();
 };
 
@@ -103,46 +143,62 @@ ws.onmessage = async (event) => {
   if (data.errors != undefined && data.errors.length > 0) {
     for (const err of data.errors) {
       const timestamp = new Date().toLocaleTimeString();
-      logs =
-        `{red-fg}[${timestamp}] ERROR: ${stripAnsi(err.message)}{/red-fg}\n\n` +
-        logs;
+      logs += `[${timestamp}]\n ERROR: ${stripAnsi(err.message)}\n`;
+      left.setContent(logs);
+      screen.render();
+
       if (ai) {
+        startSpinner();
+
         try {
           const aiResult = await genAI(stripAnsi(err.message));
-          inteli = "\n" + aiResult;
-          right.setContent(inteli);
+          inteli = aiResult;
+          right.setContent(aiResult);
         } catch (e) {
-          inteli += "AI Error: " + String(e) + "\n";
-          right.setContent(inteli);
+          right.setContent(`{red-fg}AI Error: ${String(e)}{/red-fg}`);
         }
+
+        stopSpinner();
       }
     }
-    left.setContent(logs);
-    screen.render();
   }
 
   if (data.warnings != undefined && data.warnings.length > 0) {
-    data.warnings.forEach((err: Error) => {
+    for (const err of data.warnings) {
       const timestamp = new Date().toLocaleTimeString();
       logs += `{yellow-fg}[${timestamp}] WARN: ${stripAnsi(
         err.message
       )}{/yellow-fg}\n`;
-    });
+    }
     left.setContent(logs);
     screen.render();
   }
 };
 
-ws.onerror = (err) => {
-  status.content = ` {red-fg}●{/red-fg} PORT:3000 - Connection Error - (a) Toggle Intelligence: ${
+ws.onerror = () => {
+  status.content = ` {red-fg}●{/red-fg} PORT:3000 - Connection Error - (a) AI: ${
     ai ? "ON" : "OFF"
-  } - (c) Clear Logs `;
+  } - (c) Clear - (q) Quit `;
   screen.render();
 };
 
 ws.onclose = () => {
-  status.content = ` {red-fg}●{/red-fg} PORT:3000 - Disconnected - (a) Toggle Intelligence: ${
+  status.content = ` {red-fg}●{/red-fg} PORT:3000 - Disconnected - (a) AI: ${
     ai ? "ON" : "OFF"
-  } - (c) Clear Logs `;
+  } - (c) Clear - (q) Quit `;
   screen.render();
 };
+
+process.on("uncaughtException", (err) => {
+  // Handle errors gracefully without crashing
+  right.setContent(`{red-fg}Error: ${err.message}{/red-fg}`);
+  stopSpinner();
+  screen.render();
+});
+
+process.on("unhandledRejection", (err) => {
+  // Handle promise rejections gracefully
+  right.setContent(`{red-fg}Error: ${String(err)}{/red-fg}`);
+  stopSpinner();
+  screen.render();
+});

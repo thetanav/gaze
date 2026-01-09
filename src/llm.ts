@@ -7,7 +7,7 @@ const google = createGoogleGenerativeAI({
 
 export async function genAI(error: string) {
   const result = await generateText({
-    model: google("gemini-2.5-flash-lite"),
+    model: google("gemini-2.0-flash-lite"),
     prompt: `
 # You explain Next.js errors.
 
