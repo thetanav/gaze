@@ -6,13 +6,18 @@ import { genAI } from "./llm";
 const ws = new WebSocket("ws://localhost:3000/_next/webpack-hmr");
 
 const ANSI_REGEX = /\u001b\[[0-9;]*m/g;
-let logs = "";
-let inteli = "";
-let ai = false;
 let isGenerating = false;
-let latestError = "";
 const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 let spinnerIndex = 0;
+
+// Store errors
+interface ErrorItem {
+  timestamp: string;
+  message: string;
+  aiResponse?: string;
+}
+const errors: ErrorItem[] = [];
+let currentIndex = 0;
 
 export function stripAnsi(input: string): string {
   return input.replace(ANSI_REGEX, "");
@@ -45,13 +50,12 @@ const left = blessed.box({
   parent: screen,
   left: 0,
   top: 1,
-  width: ai ? "50%" : "100%",
+  width: "50%",
   height: "100%-2",
-  label: " {bold}Logs{/bold} (j↑ k↓ c-clear) ",
+  label: " {bold}Error{/bold} ",
   scrollable: true,
   alwaysScroll: true,
   keys: true,
-  vi: true,
   tags: true,
   border: "line",
   style: {
@@ -67,7 +71,7 @@ const right = blessed.box({
   top: 1,
   width: "50%",
   height: "100%-2",
-  label: " {bold}Intelligence{/bold} (j↑ k↓) ",
+  label: " {bold}AI Insight{/bold} ",
   scrollable: true,
   alwaysScroll: true,
   keys: true,
@@ -85,50 +89,149 @@ const status = blessed.box({
   bottom: 0,
   height: 1,
   width: "100%",
-  content: ` {green-fg}●{/green-fg} PORT:3000 - (a) AI: ${
-    ai ? "ON" : "OFF"
-  } - (c) Clear - (q) Quit `,
   tags: true,
 });
 
-// Hide right pane initially since AI is off
-right.hide();
+// Focus tracking
+let focusedPane: "left" | "right" = "left";
+let aiEnabled = false;
+
+function updateLabel() {
+  const errCount = errors.length;
+  const pos = errCount > 0 ? `${currentIndex + 1}/${errCount}` : "0/0";
+  left.setLabel(` {bold}Error [${pos}]{/bold} `);
+}
+
+function updateStatus(connected = true) {
+  const connIcon = connected ? "{green-fg}●{/green-fg}" : "{red-fg}●{/red-fg}";
+  const aiStatus = aiEnabled ? "{green-fg}ON{/green-fg}" : "{red-fg}OFF{/red-fg}";
+  status.setContent(
+    ` ${connIcon} PORT:3000 | AI:${aiStatus} | {cyan-fg}h{/cyan-fg}←  {cyan-fg}l{/cyan-fg}→  {cyan-fg}j{/cyan-fg}↓  {cyan-fg}k{/cyan-fg}↑  {cyan-fg}a{/cyan-fg}:ai  {cyan-fg}c{/cyan-fg}:clear  {cyan-fg}q{/cyan-fg}:quit `
+  );
+  screen.render();
+}
+
+function renderCurrentError() {
+  updateLabel();
+  
+  if (errors.length === 0) {
+    left.setContent("{gray-fg}No errors yet...{/gray-fg}");
+    right.setContent("{gray-fg}Turn on AI for insights{/gray-fg}");
+    screen.render();
+    return;
+  }
+
+  const err = errors[currentIndex];
+  if (!err) return;
+  
+  left.setContent(`{yellow-fg}[${err.timestamp}]{/yellow-fg}\n\n${err.message}`);
+  left.scrollTo(0);
+
+  // Show cached AI response or generate new one (only if AI enabled)
+  if (aiEnabled) {
+    if (err.aiResponse) {
+      right.setContent(err.aiResponse);
+    } else {
+      getAIForCurrent();
+    }
+  } else {
+    right.setContent("{gray-fg}Turn on AI for insights{/gray-fg}");
+  }
+  
+  screen.render();
+}
+
+async function getAIForCurrent() {
+  if (errors.length === 0 || isGenerating || !aiEnabled) return;
+
+  const err = errors[currentIndex];
+  if (!err) return;
+  
+  if (err.aiResponse) {
+    right.setContent(err.aiResponse);
+    screen.render();
+    return;
+  }
+
+  startSpinner();
+  try {
+    const aiResult = await genAI(err.message);
+    err.aiResponse = aiResult;
+    // Only update if still on same error
+    if (errors[currentIndex] === err) {
+      right.setContent(aiResult);
+    }
+  } catch (e) {
+    right.setContent(`{red-fg}AI Error: ${String(e)}{/red-fg}`);
+  }
+  stopSpinner();
+}
+
+// Navigation: h/l for prev/next error
+screen.key(["h"], () => {
+  if (currentIndex > 0) {
+    currentIndex--;
+    renderCurrentError();
+  }
+});
+
+screen.key(["l"], () => {
+  if (currentIndex < errors.length - 1) {
+    currentIndex++;
+    renderCurrentError();
+  }
+});
+
+// Scroll: j/k for vertical scroll in focused pane
+screen.key(["j"], () => {
+  if (focusedPane === "left") {
+    left.scroll(1);
+  } else {
+    right.scroll(1);
+  }
+  screen.render();
+});
+
+screen.key(["k"], () => {
+  if (focusedPane === "left") {
+    left.scroll(-1);
+  } else {
+    right.scroll(-1);
+  }
+  screen.render();
+});
+
+// Tab to switch focus between panes
+screen.key(["tab"], () => {
+  focusedPane = focusedPane === "left" ? "right" : "left";
+  if (focusedPane === "left") {
+    left.style.border.fg = "cyan";
+    right.style.border.fg = "gray";
+  } else {
+    left.style.border.fg = "gray";
+    right.style.border.fg = "green";
+  }
+  screen.render();
+});
 
 screen.key(["q", "C-c"], () => {
+  ws.close();
   screen.destroy();
   process.exit(0);
 });
-screen.key(["a"], async () => {
-  ai = !ai;
-  if (ai) {
-    right.show();
-    left.width = "50%";
-    // Generate AI for latest error when turning on
-    if (latestError && !isGenerating) {
-      startSpinner();
-      try {
-        const aiResult = await genAI(latestError);
-        inteli = aiResult;
-        right.setContent(aiResult);
-      } catch (e) {
-        right.setContent(`{red-fg}AI Error: ${String(e)}{/red-fg}`);
-      }
-      stopSpinner();
-    }
-  } else {
-    right.hide();
-    left.width = "100%";
-  }
-  status.content = ` {green-fg}●{/green-fg} PORT:3000 - (a) AI: ${ai ? "ON" : "OFF"} - (c) Clear - (q) Quit `;
-  screen.render();
-});
+
 screen.key(["c"], () => {
-  logs = "";
-  left.setContent(logs);
-  screen.render();
+  errors.length = 0;
+  currentIndex = 0;
+  renderCurrentError();
 });
 
-screen.render();
+// Toggle AI
+screen.key(["a"], () => {
+  aiEnabled = !aiEnabled;
+  updateStatus();
+  renderCurrentError();
+});
 
 let spinnerInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -137,7 +240,7 @@ function startSpinner() {
   spinnerInterval = setInterval(() => {
     spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
     right.setContent(
-      `{yellow-fg} ${spinnerFrames[spinnerIndex]} Thinking{/yellow-fg}`
+      `{yellow-fg} ${spinnerFrames[spinnerIndex]} Thinking...{/yellow-fg}`
     );
     screen.render();
   }, 80);
@@ -152,73 +255,53 @@ function stopSpinner() {
   screen.render();
 }
 
+// Initial render
+updateStatus();
+renderCurrentError();
+
 ws.onopen = () => {
-  screen.render();
+  updateStatus(true);
 };
 
 ws.onmessage = async (event) => {
-  const data = JSON.parse(event.data);
+  try {
+    const data = JSON.parse(event.data);
 
-  if (data.errors != undefined && data.errors.length > 0) {
-    for (const err of data.errors) {
+    if (data.errors && data.errors.length > 0) {
+      // Replace errors list (not append)
+      errors.length = 0;
       const timestamp = new Date().toLocaleTimeString();
-      const errorMsg = stripAnsi(err.message);
-      logs += `[${timestamp}]\n ERROR: ${errorMsg}\n`;
-      left.setContent(logs);
-      latestError = errorMsg;
-      screen.render();
-
-      if (ai && !isGenerating) {
-        startSpinner();
-
-        try {
-          const aiResult = await genAI(errorMsg);
-          inteli = aiResult;
-          right.setContent(aiResult);
-        } catch (e) {
-          right.setContent(`{red-fg}AI Error: ${String(e)}{/red-fg}`);
-        }
-
-        stopSpinner();
+      
+      for (const err of data.errors) {
+        errors.push({
+          timestamp,
+          message: stripAnsi(err.message),
+        });
       }
+      
+      currentIndex = 0;
+      renderCurrentError();
     }
-  }
-
-  if (data.warnings != undefined && data.warnings.length > 0) {
-    for (const err of data.warnings) {
-      const timestamp = new Date().toLocaleTimeString();
-      logs += `{yellow-fg}[${timestamp}] WARN: ${stripAnsi(
-        err.message
-      )}{/yellow-fg}\n`;
-    }
-    left.setContent(logs);
-    screen.render();
+  } catch {
+    // Ignore non-JSON or malformed messages
   }
 };
 
 ws.onerror = () => {
-  status.content = ` {red-fg}●{/red-fg} PORT:3000 - Connection Error - (a) AI: ${
-    ai ? "ON" : "OFF"
-  } - (c) Clear - (q) Quit `;
-  screen.render();
+  updateStatus(false);
 };
 
 ws.onclose = () => {
-  status.content = ` {red-fg}●{/red-fg} PORT:3000 - Disconnected - (a) AI: ${
-    ai ? "ON" : "OFF"
-  } - (c) Clear - (q) Quit `;
-  screen.render();
+  updateStatus(false);
 };
 
 process.on("uncaughtException", (err) => {
-  // Handle errors gracefully without crashing
   right.setContent(`{red-fg}Error: ${err.message}{/red-fg}`);
   stopSpinner();
   screen.render();
 });
 
 process.on("unhandledRejection", (err) => {
-  // Handle promise rejections gracefully
   right.setContent(`{red-fg}Error: ${String(err)}{/red-fg}`);
   stopSpinner();
   screen.render();
