@@ -1,13 +1,15 @@
 import { generateText } from "ai";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 
-const google = createGoogleGenerativeAI({
-  apiKey: Bun.env.GEMINI_API_KEY! as string,
+export const AI_SDK_LOG_WARNINGS = false;
+
+const openrouter = createOpenRouter({
+  apiKey: Bun.env.OPENROUTER_API_KEY! as string,
 });
 
 export async function genAI(error: string) {
   const result = await generateText({
-    model: google("gemini-2.0-flash-lite"),
+    model: openrouter("z-ai/glm-4.5-air:free"),
     prompt: `
 # You explain Next.js errors.
 

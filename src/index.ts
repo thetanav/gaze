@@ -1,3 +1,5 @@
+globalThis.AI_SDK_LOG_WARNINGS = false;
+
 import blessed from "blessed";
 import { genAI } from "./llm";
 
@@ -6,8 +8,9 @@ const ws = new WebSocket("ws://localhost:3000/_next/webpack-hmr");
 const ANSI_REGEX = /\u001b\[[0-9;]*m/g;
 let logs = "";
 let inteli = "";
-let ai = true;
+let ai = false;
 let isGenerating = false;
+let latestError = "";
 const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 let spinnerIndex = 0;
 
@@ -88,19 +91,35 @@ const status = blessed.box({
   tags: true,
 });
 
+// Hide right pane initially since AI is off
+right.hide();
+
 screen.key(["q", "C-c"], () => {
   screen.destroy();
   process.exit(0);
 });
-screen.key(["a"], () => {
+screen.key(["a"], async () => {
   ai = !ai;
   if (ai) {
     right.show();
     left.width = "50%";
+    // Generate AI for latest error when turning on
+    if (latestError && !isGenerating) {
+      startSpinner();
+      try {
+        const aiResult = await genAI(latestError);
+        inteli = aiResult;
+        right.setContent(aiResult);
+      } catch (e) {
+        right.setContent(`{red-fg}AI Error: ${String(e)}{/red-fg}`);
+      }
+      stopSpinner();
+    }
   } else {
     right.hide();
     left.width = "100%";
   }
+  status.content = ` {green-fg}●{/green-fg} PORT:3000 - (a) AI: ${ai ? "ON" : "OFF"} - (c) Clear - (q) Quit `;
   screen.render();
 });
 screen.key(["c"], () => {
@@ -143,15 +162,17 @@ ws.onmessage = async (event) => {
   if (data.errors != undefined && data.errors.length > 0) {
     for (const err of data.errors) {
       const timestamp = new Date().toLocaleTimeString();
-      logs += `[${timestamp}]\n ERROR: ${stripAnsi(err.message)}\n`;
+      const errorMsg = stripAnsi(err.message);
+      logs += `[${timestamp}]\n ERROR: ${errorMsg}\n`;
       left.setContent(logs);
+      latestError = errorMsg;
       screen.render();
 
-      if (ai) {
+      if (ai && !isGenerating) {
         startSpinner();
 
         try {
-          const aiResult = await genAI(stripAnsi(err.message));
+          const aiResult = await genAI(errorMsg);
           inteli = aiResult;
           right.setContent(aiResult);
         } catch (e) {
