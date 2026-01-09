@@ -50,7 +50,7 @@ const left = blessed.box({
   parent: screen,
   left: 0,
   top: 1,
-  width: "50%",
+  width: "100%",
   height: "100%-2",
   label: " {bold}Error{/bold} ",
   scrollable: true,
@@ -96,6 +96,20 @@ const status = blessed.box({
 let focusedPane: "left" | "right" = "left";
 let aiEnabled = false;
 
+// Hide right pane initially (AI off by default)
+right.hide();
+
+function updateLayout() {
+  if (aiEnabled) {
+    left.width = "50%";
+    right.show();
+  } else {
+    left.width = "100%";
+    right.hide();
+    focusedPane = "left";
+  }
+}
+
 function updateLabel() {
   const errCount = errors.length;
   const pos = errCount > 0 ? `${currentIndex + 1}/${errCount}` : "0/0";
@@ -104,27 +118,31 @@ function updateLabel() {
 
 function updateStatus(connected = true) {
   const connIcon = connected ? "{green-fg}●{/green-fg}" : "{red-fg}●{/red-fg}";
-  const aiStatus = aiEnabled ? "{green-fg}ON{/green-fg}" : "{red-fg}OFF{/red-fg}";
+  const aiStatus = aiEnabled
+    ? "{green-fg}ON{/green-fg}"
+    : "{red-fg}OFF{/red-fg}";
   status.setContent(
-    ` ${connIcon} PORT:3000 | AI:${aiStatus} | {cyan-fg}h{/cyan-fg}←  {cyan-fg}l{/cyan-fg}→  {cyan-fg}j{/cyan-fg}↓  {cyan-fg}k{/cyan-fg}↑  {cyan-fg}a{/cyan-fg}:ai  {cyan-fg}c{/cyan-fg}:clear  {cyan-fg}q{/cyan-fg}:quit `
+    ` ${connIcon} PORT:3000 | AI:${aiStatus} | {cyan-fg}h{/cyan-fg}← {cyan-fg}j{/cyan-fg}↓ {cyan-fg}k{/cyan-fg}↑ {cyan-fg}l{/cyan-fg}→  {cyan-fg}a{/cyan-fg}:ai  {cyan-fg}c{/cyan-fg}:clear  {cyan-fg}q{/cyan-fg}:quit `
   );
   screen.render();
 }
 
 function renderCurrentError() {
   updateLabel();
-  
+  updateLayout();
+
   if (errors.length === 0) {
     left.setContent("{gray-fg}No errors yet...{/gray-fg}");
-    right.setContent("{gray-fg}Turn on AI for insights{/gray-fg}");
     screen.render();
     return;
   }
 
   const err = errors[currentIndex];
   if (!err) return;
-  
-  left.setContent(`{yellow-fg}[${err.timestamp}]{/yellow-fg}\n\n${err.message}`);
+
+  left.setContent(
+    `{yellow-fg}[${err.timestamp}]{/yellow-fg}\n\n${err.message}`
+  );
   left.scrollTo(0);
 
   // Show cached AI response or generate new one (only if AI enabled)
@@ -134,10 +152,8 @@ function renderCurrentError() {
     } else {
       getAIForCurrent();
     }
-  } else {
-    right.setContent("{gray-fg}Turn on AI for insights{/gray-fg}");
   }
-  
+
   screen.render();
 }
 
@@ -146,7 +162,7 @@ async function getAIForCurrent() {
 
   const err = errors[currentIndex];
   if (!err) return;
-  
+
   if (err.aiResponse) {
     right.setContent(err.aiResponse);
     screen.render();
@@ -184,25 +200,26 @@ screen.key(["l"], () => {
 
 // Scroll: j/k for vertical scroll in focused pane
 screen.key(["j"], () => {
-  if (focusedPane === "left") {
-    left.scroll(1);
-  } else {
+  if (aiEnabled && focusedPane === "right") {
     right.scroll(1);
+  } else {
+    left.scroll(1);
   }
   screen.render();
 });
 
 screen.key(["k"], () => {
-  if (focusedPane === "left") {
-    left.scroll(-1);
-  } else {
+  if (aiEnabled && focusedPane === "right") {
     right.scroll(-1);
+  } else {
+    left.scroll(-1);
   }
   screen.render();
 });
 
-// Tab to switch focus between panes
+// Tab to switch focus between panes (only when AI is on)
 screen.key(["tab"], () => {
+  if (!aiEnabled) return;
   focusedPane = focusedPane === "left" ? "right" : "left";
   if (focusedPane === "left") {
     left.style.border.fg = "cyan";
@@ -271,14 +288,14 @@ ws.onmessage = async (event) => {
       // Replace errors list (not append)
       errors.length = 0;
       const timestamp = new Date().toLocaleTimeString();
-      
+
       for (const err of data.errors) {
         errors.push({
           timestamp,
           message: stripAnsi(err.message),
         });
       }
-      
+
       currentIndex = 0;
       renderCurrentError();
     }
