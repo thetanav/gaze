@@ -11,6 +11,8 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.6",
+    "ai": "^6.0.24",
     "blessed": "^0.1.81"
   }
 }
