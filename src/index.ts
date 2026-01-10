@@ -1,3 +1,5 @@
+#!/usr/bin/env bun
+
 globalThis.AI_SDK_LOG_WARNINGS = false;
 
 import blessed from "blessed";

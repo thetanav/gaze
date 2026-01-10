@@ -1,10 +1,13 @@
 {
-  "name": "gaze",
+  "name": "@10xdevs/gaze",
+  "version": "0.0.5",
   "module": "index.ts",
   "type": "module",
-  "private": true,
   "scripts": {
     "start": "bun src/index.ts"
+  },
+  "bin": {
+    "gaze": "./src/index.ts"
   },
   "devDependencies": {
     "@types/blessed": "^0.1.27",
