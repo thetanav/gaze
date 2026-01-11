@@ -1,15 +1,11 @@
 # gaze
 
-To install dependencies:
+To use (bun):
 
 ```bash
-bun install
+bunx @10xdevs/gaze 3001
 ```
 
-To run:
+> if you not porvide the port it will be default to 3000
 
-```bash
-bun run index.ts
-```
-
-This project was created using `bun init` in bun v1.3.5. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
+Usage:

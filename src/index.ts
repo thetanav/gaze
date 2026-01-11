@@ -5,7 +5,9 @@ globalThis.AI_SDK_LOG_WARNINGS = false;
 import blessed from "blessed";
 import { genAI } from "./llm";
 
-const ws = new WebSocket("ws://localhost:3000/_next/webpack-hmr");
+const port = Bun.argv[2] || "3000";
+
+const ws = new WebSocket(`ws://localhost:${port}/_next/webpack-hmr`);
 
 const ANSI_REGEX = /\u001b\[[0-9;]*m/g;
 let isGenerating = false;
@@ -124,7 +126,7 @@ function updateStatus(connected = true) {
     ? "{green-fg}ON{/green-fg}"
     : "{red-fg}OFF{/red-fg}";
   status.setContent(
-    ` ${connIcon} PORT:3000 | AI:${aiStatus} | {cyan-fg}h{/cyan-fg}← {cyan-fg}j{/cyan-fg}↓ {cyan-fg}k{/cyan-fg}↑ {cyan-fg}l{/cyan-fg}→  {cyan-fg}a{/cyan-fg}:ai  {cyan-fg}c{/cyan-fg}:clear  {cyan-fg}q{/cyan-fg}:quit `
+    ` ${connIcon} PORT:${port} | AI:${aiStatus} | {cyan-fg}h{/cyan-fg}← {cyan-fg}j{/cyan-fg}↓ {cyan-fg}k{/cyan-fg}↑ {cyan-fg}l{/cyan-fg}→  {cyan-fg}a{/cyan-fg}:ai  {cyan-fg}c{/cyan-fg}:clear  {cyan-fg}q{/cyan-fg}:quit `
   );
   screen.render();
 }
