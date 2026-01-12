@@ -3,7 +3,7 @@
 globalThis.AI_SDK_LOG_WARNINGS = false;
 
 import blessed from "blessed";
-import { genAI } from "./llm";
+import { streamAI } from "./llm";
 
 const port = Bun.argv[2] || "3000";
 
@@ -11,8 +11,7 @@ const ws = new WebSocket(`ws://localhost:${port}/_next/webpack-hmr`);
 
 const ANSI_REGEX = /\u001b\[[0-9;]*m/g;
 let isGenerating = false;
-const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-let spinnerIndex = 0;
+let copyNotificationTimeout: ReturnType<typeof setTimeout> | null = null;
 
 // Store errors
 interface ErrorItem {
@@ -25,6 +24,72 @@ let currentIndex = 0;
 
 export function stripAnsi(input: string): string {
   return input.replace(ANSI_REGEX, "");
+}
+
+// Extract code snippets from markdown code blocks
+function extractCodeSnippet(text: string): string | null {
+  // Match ```lang\ncode\n``` or ```\ncode\n```
+  const codeBlockRegex = /```(?:\w+)?\n([\s\S]*?)```/g;
+  const matches: string[] = [];
+  
+  let match;
+  while ((match = codeBlockRegex.exec(text)) !== null) {
+    if (match[1]) {
+      matches.push(match[1].trim());
+    }
+  }
+  
+  // Return all code blocks joined, or null if none found
+  return matches.length > 0 ? matches.join("\n\n") : null;
+}
+
+// Copy text to clipboard using different methods
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    // Try using Bun's shell to access system clipboard
+    const proc = Bun.spawn(["sh", "-c", `printf '%s' "$1" | ${getClipboardCommand()}`, "_", text], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await proc.exited;
+    return proc.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+function getClipboardCommand(): string {
+  const platform = process.platform;
+  if (platform === "darwin") {
+    return "pbcopy";
+  } else if (platform === "linux") {
+    // Try xclip first, then xsel, then wl-copy (Wayland)
+    return "xclip -selection clipboard 2>/dev/null || xsel --clipboard --input 2>/dev/null || wl-copy 2>/dev/null";
+  } else if (platform === "win32") {
+    return "clip";
+  }
+  return "xclip -selection clipboard";
+}
+
+function showCopyNotification(message: string) {
+  // Clear any existing notification
+  if (copyNotificationTimeout) {
+    clearTimeout(copyNotificationTimeout);
+  }
+  
+  // Update header with notification
+  header.setContent(
+    ` {bold}{cyan-fg}GAZE{/cyan-fg}{/bold} - {green-fg}${message}{/green-fg}`
+  );
+  screen.render();
+  
+  // Reset after 2 seconds
+  copyNotificationTimeout = setTimeout(() => {
+    header.setContent(
+      " {bold}{cyan-fg}GAZE{/cyan-fg}{/bold} - Next.js Development Monitor"
+    );
+    screen.render();
+  }, 2000);
 }
 
 const screen = blessed.screen({
@@ -59,6 +124,17 @@ const left = blessed.box({
   label: " {bold}Error{/bold} ",
   scrollable: true,
   alwaysScroll: true,
+  scrollbar: {
+    ch: "│",
+    track: {
+      bg: "black",
+    },
+    style: {
+      fg: "cyan",
+      bg: "black",
+    },
+  },
+  mouse: true,
   keys: true,
   tags: true,
   border: "line",
@@ -78,6 +154,17 @@ const right = blessed.box({
   label: " {bold}AI Insight{/bold} ",
   scrollable: true,
   alwaysScroll: true,
+  scrollbar: {
+    ch: "│",
+    track: {
+      bg: "black",
+    },
+    style: {
+      fg: "green",
+      bg: "black",
+    },
+  },
+  mouse: true,
   keys: true,
   tags: true,
   border: "line",
@@ -99,6 +186,9 @@ const status = blessed.box({
 // Focus tracking
 let focusedPane: "left" | "right" = "left";
 let aiEnabled = false;
+
+// Scroll amount per keypress
+const SCROLL_AMOUNT = 3;
 
 // Hide right pane initially (AI off by default)
 right.hide();
@@ -125,8 +215,9 @@ function updateStatus(connected = true) {
   const aiStatus = aiEnabled
     ? "{green-fg}ON{/green-fg}"
     : "{red-fg}OFF{/red-fg}";
+  const streamingStatus = isGenerating ? " {yellow-fg}⟳{/yellow-fg}" : "";
   status.setContent(
-    ` ${connIcon} PORT:${port} | AI:${aiStatus} | {cyan-fg}h{/cyan-fg}← {cyan-fg}j{/cyan-fg}↓ {cyan-fg}k{/cyan-fg}↑ {cyan-fg}l{/cyan-fg}→  {cyan-fg}a{/cyan-fg}:ai  {cyan-fg}c{/cyan-fg}:clear  {cyan-fg}q{/cyan-fg}:quit `
+    ` ${connIcon} PORT:${port} | AI:${aiStatus}${streamingStatus} | {cyan-fg}hjkl{/cyan-fg}:nav  {cyan-fg}a{/cyan-fg}:ai  {cyan-fg}e{/cyan-fg}:copy err  {cyan-fg}v{/cyan-fg}:copy fix  {cyan-fg}c{/cyan-fg}:clear  {cyan-fg}q{/cyan-fg}:quit `
   );
   screen.render();
 }
@@ -137,6 +228,9 @@ function renderCurrentError() {
 
   if (errors.length === 0) {
     left.setContent("{gray-fg}No errors yet...{/gray-fg}");
+    if (aiEnabled) {
+      right.setContent("{gray-fg}Waiting for errors...{/gray-fg}");
+    }
     screen.render();
     return;
   }
@@ -153,15 +247,16 @@ function renderCurrentError() {
   if (aiEnabled) {
     if (err.aiResponse) {
       right.setContent(err.aiResponse);
+      right.scrollTo(0);
     } else {
-      getAIForCurrent();
+      streamAIForCurrent();
     }
   }
 
   screen.render();
 }
 
-async function getAIForCurrent() {
+async function streamAIForCurrent() {
   if (errors.length === 0 || isGenerating || !aiEnabled) return;
 
   const err = errors[currentIndex];
@@ -169,22 +264,45 @@ async function getAIForCurrent() {
 
   if (err.aiResponse) {
     right.setContent(err.aiResponse);
+    right.scrollTo(0);
     screen.render();
     return;
   }
 
-  startSpinner();
-  try {
-    const aiResult = await genAI(err.message);
-    err.aiResponse = aiResult;
-    // Only update if still on same error
-    if (errors[currentIndex] === err) {
-      right.setContent(aiResult);
-    }
-  } catch (e) {
-    right.setContent(`{red-fg}AI Error: ${String(e)}{/red-fg}`);
-  }
-  stopSpinner();
+  isGenerating = true;
+  updateStatus();
+
+  // Store reference to track if user navigated away
+  const errorBeingProcessed = err;
+
+  streamAI(err.message, {
+    onToken: (fullText) => {
+      // Only update if still viewing the same error
+      if (errors[currentIndex] === errorBeingProcessed && aiEnabled) {
+        right.setContent(fullText);
+        screen.render();
+      }
+    },
+    onComplete: (fullText) => {
+      errorBeingProcessed.aiResponse = fullText;
+      isGenerating = false;
+      updateStatus();
+
+      if (errors[currentIndex] === errorBeingProcessed && aiEnabled) {
+        right.setContent(fullText);
+        screen.render();
+      }
+    },
+    onError: (error) => {
+      isGenerating = false;
+      updateStatus();
+
+      if (errors[currentIndex] === errorBeingProcessed && aiEnabled) {
+        right.setContent(`{red-fg}AI Error: ${error.message}{/red-fg}`);
+        screen.render();
+      }
+    },
+  });
 }
 
 // Navigation: h/l for prev/next error
@@ -205,19 +323,47 @@ screen.key(["l"], () => {
 // Scroll: j/k for vertical scroll in focused pane
 screen.key(["j"], () => {
   if (aiEnabled && focusedPane === "right") {
-    right.scroll(1);
+    right.scroll(SCROLL_AMOUNT);
   } else {
-    left.scroll(1);
+    left.scroll(SCROLL_AMOUNT);
   }
   screen.render();
 });
 
 screen.key(["k"], () => {
   if (aiEnabled && focusedPane === "right") {
-    right.scroll(-1);
+    right.scroll(-SCROLL_AMOUNT);
   } else {
-    left.scroll(-1);
+    left.scroll(-SCROLL_AMOUNT);
   }
+  screen.render();
+});
+
+// Page up/down for faster scrolling
+screen.key(["pagedown", "C-d"], () => {
+  const pane = aiEnabled && focusedPane === "right" ? right : left;
+  pane.scroll(10);
+  screen.render();
+});
+
+screen.key(["pageup", "C-u"], () => {
+  const pane = aiEnabled && focusedPane === "right" ? right : left;
+  pane.scroll(-10);
+  screen.render();
+});
+
+// Home/End to jump to top/bottom
+screen.key(["home", "g"], () => {
+  const pane = aiEnabled && focusedPane === "right" ? right : left;
+  pane.scrollTo(0);
+  screen.render();
+});
+
+screen.key(["end", "G"], () => {
+  const pane = aiEnabled && focusedPane === "right" ? right : left;
+  // @ts-ignore - getScrollHeight exists on scrollable boxes
+  const scrollHeight = pane.getScrollHeight?.() || 1000;
+  pane.scrollTo(scrollHeight);
   screen.render();
 });
 
@@ -254,27 +400,50 @@ screen.key(["a"], () => {
   renderCurrentError();
 });
 
-let spinnerInterval: ReturnType<typeof setInterval> | null = null;
-
-function startSpinner() {
-  isGenerating = true;
-  spinnerInterval = setInterval(() => {
-    spinnerIndex = (spinnerIndex + 1) % spinnerFrames.length;
-    right.setContent(
-      `{yellow-fg} ${spinnerFrames[spinnerIndex]} Thinking...{/yellow-fg}`
-    );
-    screen.render();
-  }, 80);
-}
-
-function stopSpinner() {
-  isGenerating = false;
-  if (spinnerInterval) {
-    clearInterval(spinnerInterval);
-    spinnerInterval = null;
+// Copy error to clipboard (e key)
+screen.key(["e"], async () => {
+  if (errors.length === 0) {
+    showCopyNotification("No error to copy");
+    return;
   }
-  screen.render();
-}
+  
+  const err = errors[currentIndex];
+  if (!err) return;
+  
+  const success = await copyToClipboard(err.message);
+  if (success) {
+    showCopyNotification("Error copied to clipboard!");
+  } else {
+    showCopyNotification("Failed to copy (no clipboard tool)");
+  }
+});
+
+// Copy code snippet from AI response (v key)
+screen.key(["v"], async () => {
+  if (errors.length === 0) {
+    showCopyNotification("No error selected");
+    return;
+  }
+  
+  const err = errors[currentIndex];
+  if (!err?.aiResponse) {
+    showCopyNotification("No AI response yet (press 'a' to enable AI)");
+    return;
+  }
+  
+  const codeSnippet = extractCodeSnippet(err.aiResponse);
+  if (!codeSnippet) {
+    showCopyNotification("No code snippet found in AI response");
+    return;
+  }
+  
+  const success = await copyToClipboard(codeSnippet);
+  if (success) {
+    showCopyNotification("Code snippet copied to clipboard!");
+  } else {
+    showCopyNotification("Failed to copy (no clipboard tool)");
+  }
+});
 
 // Initial render
 updateStatus();
@@ -318,12 +487,14 @@ ws.onclose = () => {
 
 process.on("uncaughtException", (err) => {
   right.setContent(`{red-fg}Error: ${err.message}{/red-fg}`);
-  stopSpinner();
+  isGenerating = false;
+  updateStatus();
   screen.render();
 });
 
 process.on("unhandledRejection", (err) => {
   right.setContent(`{red-fg}Error: ${String(err)}{/red-fg}`);
-  stopSpinner();
+  isGenerating = false;
+  updateStatus();
   screen.render();
 });
